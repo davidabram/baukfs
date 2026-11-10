@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 baukfs = { path = "crates/baukfs" }
+turso = { version = "=0.8.3", default-features = false }
 
 [workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }

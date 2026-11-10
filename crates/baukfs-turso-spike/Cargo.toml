@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-turso = { version = "=0.8.3", default-features = false }
+turso.workspace = true
 
 [lints]
 workspace = true

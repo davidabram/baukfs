@@ -28,11 +28,11 @@ Constraints production storage must respect:
 
 ## Dependency configuration
 
-Unchanged from T03:
+Unchanged from T03. Since T05 the pin is declared once in the root manifest, and both the spike and the `baukfs` library use it through `turso.workspace = true`:
 
 ```toml
-# crates/baukfs-turso-spike/Cargo.toml
-[dependencies]
+# Cargo.toml
+[workspace.dependencies]
 turso = { version = "=0.8.3", default-features = false }
 ```
 

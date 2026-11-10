@@ -1,4 +1,5 @@
 mod id;
+pub mod storage;
 mod workspace;
 
 pub use id::{IdError, IdKind, RevisionId, SessionId, WorkspaceId};
