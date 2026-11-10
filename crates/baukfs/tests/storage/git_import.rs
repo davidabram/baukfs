@@ -647,3 +647,64 @@ fn provenance_is_immutable_and_reads_reject_malformed_or_unmatched_origins() {
         Err(StorageError::History(HistoryError::MalformedGitOrigin))
     ));
 }
+
+#[test]
+fn import_then_restore_exact_snapshot_without_database_changes() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new("import-restore");
+    let repo = repo(&dir, "sha1");
+    let selected = dirty_fixture(&repo);
+    let mut store = store(&dir);
+    let imported = import(&repo, &selected, &mut store).unwrap();
+    let revision = imported.origin.root_revision();
+    let manifest = block_on(store.read_manifest(&imported.manifest))
+        .unwrap()
+        .unwrap();
+    let connection = raw_connection(&dir.database());
+    let tables = [
+        "baukfs_metadata",
+        "baukfs_content",
+        "baukfs_manifests",
+        "baukfs_revisions",
+        "baukfs_workspace",
+        "baukfs_git_origin",
+    ];
+    let before =
+        tables.map(|table| raw_values(&connection, &format!("SELECT * FROM {table} ORDER BY 1")));
+    let destination = dir.path().join("restored");
+    let receipt = block_on(baukfs::restoration::restore_revision(
+        &mut store,
+        revision,
+        &destination,
+    ))
+    .unwrap();
+    assert_eq!(receipt.manifest, imported.manifest);
+    for entry in manifest.entries() {
+        let path = destination.join(std::ffi::OsStr::from_bytes(entry.path().as_bytes()));
+        match entry.kind() {
+            EntryKind::Directory => assert!(fs::symlink_metadata(path).unwrap().is_dir()),
+            EntryKind::RegularFile {
+                content,
+                executable,
+            } => {
+                assert_eq!(
+                    fs::read(&path).unwrap(),
+                    block_on(store.read_content(content)).unwrap().unwrap()
+                );
+                assert_eq!(
+                    fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+                    if *executable { 0o755 } else { 0o644 }
+                );
+            }
+            EntryKind::Symlink { target } => assert_eq!(
+                fs::read_link(path).unwrap().as_os_str().as_bytes(),
+                target.as_bytes()
+            ),
+        }
+    }
+    assert_eq!(
+        before,
+        tables.map(|table| raw_values(&connection, &format!("SELECT * FROM {table} ORDER BY 1")))
+    );
+}

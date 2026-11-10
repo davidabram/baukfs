@@ -74,6 +74,6 @@ Other pure deterministic tests cover input reordering, every identity-bearing fi
 - **Content-reference validation:** ContentIds are references. Pure construction and decoding neither check database existence nor read content bytes. T08 storage verifies all distinct regular-file references before publishing a revision and on reads.
 - **Persistence and revisions (T08):** provided by `baukfs::storage`, separately from this pure module. ManifestId is not RevisionId.
 - **Capture:** no scanning, race detection, metadata capture policy, Git import, or symlink following is implemented.
-- **Restoration and cloning:** no disk writes, containment enforcement, platform filename compatibility, executable-mode policy, or restoration through symlinks is implemented. Valid Unix byte strings need not be usable on every filesystem.
+- **Restoration and cloning:** the pure manifest model performs no disk writes. T10 restoration supplies containment and an executable-mode policy (see [restoration.md](restoration.md)); cloning remains deferred. Valid Unix byte strings need not be usable on every filesystem.
 - **Resource policy:** the model holds entries and encoded output in memory. Input-bounded decoding prevents trusting declared lengths, but does not impose an application-specific size quota or promise recovery from allocator exhaustion.
 - **Integration:** no runner, CLI command, generic serialization framework, or backend abstraction is added.

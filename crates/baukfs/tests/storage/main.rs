@@ -6,6 +6,7 @@ mod git_import;
 mod harness;
 mod history;
 mod lifecycle;
+mod restoration;
 mod support;
 mod upgrade;
 

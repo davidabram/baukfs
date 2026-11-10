@@ -40,6 +40,8 @@ Implemented:
 - Persistent canonical manifests, immutable revision lineage, and atomic workspace history (T08): validated root initialization, idle-only head compare-and-swap, verified retries, and typed conflicts (see `docs/storage.md`).
 - Local committed Git snapshot import (T09, schema version 4): explicit commit selection, SHA-1/SHA-256, raw-byte paths, controlled object reads, and atomic root history plus immutable Git provenance (see `docs/git-import.md`).
 
+- Native revision restoration (T10): private staging, exact verified bytes and symlink targets, explicit permissions, and atomic no-replace publication (see [docs/restoration.md](docs/restoration.md), including a library import/restore example).
+
 Planned, not implemented:
 
 - Filesystem scanning and capture.

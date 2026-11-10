@@ -71,4 +71,4 @@ Whole files, tree output, manifests, and canonical encodings are buffered in mem
 
 Git calls block the calling thread despite the async storage API; callers needing executor responsiveness should schedule the import appropriately. The library owns no runtime. The per-command deadline is not a whole-import deadline, and cancellation can leave committed unreferenced content. Local object IDs keep source selection stable, but concurrent removal/corruption of objects can fail an import. No network retrieval repairs it.
 
-Restoration, directory cloning, live filesystem capture, runner integration, branch publication, and new main-CLI commands remain deferred. T09 does not implement T10.
+Native restoration is available separately through T10 (see [restoration.md](restoration.md)). Directory cloning, live filesystem capture, runner integration, branch publication, and new main-CLI commands remain deferred.
