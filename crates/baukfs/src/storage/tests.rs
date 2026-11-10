@@ -1,3 +1,5 @@
+pub(super) mod history;
+
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};

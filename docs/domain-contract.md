@@ -50,10 +50,12 @@ Every rejection returns `TransitionError { operation, status }`.
 
 ## Deferred responsibilities
 
-**Storage integration (Turso):**
+**Storage integration (Turso, implemented in T08):**
 - Confirming that a checkpoint revision exists and has been committed before `record_checkpoint` is called. The model accepts any valid `RevisionId`. It does not check that the revision exists, descends from the head, or differs from it.
 - Persisting the workspace record and making transitions atomic with revision commits.
-- Generating, serializing, and indexing identifiers.
+- Generating, serializing, and indexing identifiers. T08 uses a versioned hash-derived revision spelling while preserving the opaque `RevisionId` constructor. Constructing an identifier never proves existence.
+
+Storage loads `Workspace` through a crate-private constructor that replays the T02 transitions on validated identifiers and status. It verifies the root/base, head lineage, manifests, and contents before returning that state. No public fields or unchecked public setters are added. Persisted runner-driven transitions remain deferred.
 - Concurrency control between multiple handles to the same workspace.
 
 **Runner integration:**

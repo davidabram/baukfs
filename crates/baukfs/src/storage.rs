@@ -1,6 +1,7 @@
 mod connection;
 mod content;
 mod error;
+mod history;
 mod schema;
 #[cfg(test)]
 mod tests;
@@ -22,6 +23,7 @@ pub use error::{
     Abandoned, DriverError, DriverErrorKind, DriverStep, IntegrityError, IntegrityViolation,
     StorageError,
 };
+pub use history::{HistoryError, HistoryOutcome, Revision};
 pub use schema::{CURRENT_SCHEMA_VERSION, DatabaseState, Unrecognized};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +52,7 @@ pub enum UpgradeOutcome {
 /// An open, current database for one workspace copy.
 #[derive(Debug)]
 pub struct WorkspaceStore {
-    connection: Connection,
+    connection: Option<Connection>,
     workspace_id: WorkspaceId,
     busy_timeout: BusyTimeout,
 }
@@ -167,9 +169,13 @@ impl WorkspaceStore {
     ///
     /// Returns [`StorageError::Driver`] for driver failures.
     pub async fn read_state(&self) -> Result<DatabaseState, StorageError> {
-        read_state(&self.connection)
-            .await
-            .map_err(StorageError::Driver)
+        read_state(
+            self.connection
+                .as_ref()
+                .ok_or(StorageError::ConnectionDiscarded)?,
+        )
+        .await
+        .map_err(StorageError::Driver)
     }
 
     /// Stores `bytes` under their [`ContentId`]. Inserting bytes that are
@@ -188,14 +194,12 @@ impl WorkspaceStore {
         bytes: &[u8],
     ) -> Result<(ContentId, InsertOutcome), StorageError> {
         let id = ContentId::of(bytes);
-        let settled = immediate(&mut self.connection, async |connection| {
-            content::insert_under_lock(connection, &id, bytes).await
-        })
-        .await?;
-        match settled {
-            Settled::Committed(outcome) => Ok((id, outcome)),
-            Settled::RolledBack(abandoned) => Err(rolled_back(abandoned, &self.workspace_id)),
-        }
+        let outcome = self
+            .history_transaction(TransactionBehavior::Immediate, async |connection| {
+                content::insert_under_lock(connection, &id, bytes).await
+            })
+            .await?;
+        Ok((id, outcome))
     }
 
     /// Reads the bytes stored under `id`, or `None` if nothing is stored
@@ -207,12 +211,109 @@ impl WorkspaceStore {
     /// Returns [`StorageError::Integrity`] for a damaged record and
     /// [`StorageError::Driver`] for driver failures.
     pub async fn read_content(&self, id: &ContentId) -> Result<Option<Vec<u8>>, StorageError> {
-        content::read(&self.connection, id, DriverStep::ReadContent)
-            .await
-            .map_err(|failure| match failure {
-                Read::Failed(error) => StorageError::Driver(error),
-                Read::Integrity(error) => StorageError::Integrity(error),
-            })
+        content::read(
+            self.connection
+                .as_ref()
+                .ok_or(StorageError::ConnectionDiscarded)?,
+            id,
+            DriverStep::ReadContent,
+        )
+        .await
+        .map_err(|failure| match failure {
+            Read::Failed(error) => StorageError::Driver(error),
+            Read::Integrity(error) => StorageError::Integrity(error),
+        })
+    }
+
+    /// Initializes root history and an idle workspace atomically.
+    ///
+    /// # Errors
+    /// Returns typed history, content integrity, transaction, or driver errors.
+    /// A commit or rollback failure discards the connection; reopen to reconcile.
+    pub async fn initialize_history(
+        &mut self,
+        session: &crate::SessionId,
+        manifest: &crate::Manifest,
+    ) -> Result<(crate::Workspace, HistoryOutcome), StorageError> {
+        let id = self.workspace_id.clone();
+        self.history_transaction(TransactionBehavior::Immediate, async |connection| {
+            history::initialize(connection, &id, session, manifest).await
+        })
+        .await
+    }
+
+    /// Advances an idle workspace using an expected-head compare-and-swap.
+    ///
+    /// # Errors
+    /// Returns typed conflicts, missing references, integrity or transaction errors.
+    /// A commit or rollback failure discards the connection; reopen to reconcile.
+    pub async fn advance_head(
+        &mut self,
+        expected: &crate::RevisionId,
+        manifest: &crate::Manifest,
+    ) -> Result<(crate::Workspace, HistoryOutcome), StorageError> {
+        let id = self.workspace_id.clone();
+        self.history_transaction(TransactionBehavior::Immediate, async |connection| {
+            history::advance(connection, &id, expected, manifest).await
+        })
+        .await
+    }
+
+    /// Reads validated workspace history from one database snapshot.
+    ///
+    /// # Errors
+    /// Returns typed missing-reference, integrity, or transaction errors.
+    pub async fn read_workspace(&mut self) -> Result<Option<crate::Workspace>, StorageError> {
+        let id = self.workspace_id.clone();
+        self.history_transaction(TransactionBehavior::Deferred, async |connection| {
+            history::workspace(connection, &id).await
+        })
+        .await
+    }
+
+    /// Reads a revision and verifies its complete ancestry and contents.
+    ///
+    /// # Errors
+    /// Returns typed missing-reference, integrity, or transaction errors.
+    pub async fn read_revision(
+        &mut self,
+        id: &crate::RevisionId,
+    ) -> Result<Option<Revision>, StorageError> {
+        self.history_transaction(TransactionBehavior::Deferred, async |connection| {
+            history::revision(connection, id).await
+        })
+        .await
+    }
+
+    /// Reads a canonical manifest and verifies its content references.
+    ///
+    /// # Errors
+    /// Returns typed missing-reference, integrity, or transaction errors.
+    pub async fn read_manifest(
+        &mut self,
+        id: &crate::ManifestId,
+    ) -> Result<Option<crate::Manifest>, StorageError> {
+        self.history_transaction(TransactionBehavior::Deferred, async |connection| {
+            history::manifest(connection, id).await
+        })
+        .await
+    }
+
+    async fn history_transaction<T>(
+        &mut self,
+        behavior: TransactionBehavior,
+        work: impl AsyncFnOnce(&Connection) -> Result<T, Abandoned>,
+    ) -> Result<T, StorageError> {
+        let mut connection = self
+            .connection
+            .take()
+            .ok_or(StorageError::ConnectionDiscarded)?;
+        let settled = checked(&mut connection, behavior, work).await?;
+        self.connection = Some(connection);
+        match settled {
+            Settled::Committed(value) => Ok(value),
+            Settled::RolledBack(abandoned) => Err(rolled_back(abandoned, &self.workspace_id)),
+        }
     }
 
     /// Opens read-write a database that a read-only check just found
@@ -238,7 +339,7 @@ impl WorkspaceStore {
             .map_err(StorageError::Driver)?
         {
             DatabaseState::Current(stored) if stored == *workspace_id => Ok(Self {
-                connection,
+                connection: Some(connection),
                 workspace_id: stored,
                 busy_timeout,
             }),
@@ -292,8 +393,16 @@ async fn immediate<T>(
     connection: &mut Connection,
     work: impl AsyncFnOnce(&Connection) -> Result<T, Abandoned>,
 ) -> Result<Settled<T>, StorageError> {
+    checked(connection, TransactionBehavior::Immediate, work).await
+}
+
+async fn checked<T>(
+    connection: &mut Connection,
+    behavior: TransactionBehavior,
+    work: impl AsyncFnOnce(&Connection) -> Result<T, Abandoned>,
+) -> Result<Settled<T>, StorageError> {
     let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .transaction_with_behavior(behavior)
         .await
         .map_err(|error| driver(DriverStep::Begin, error))?;
     match work(&transaction).await {
@@ -409,5 +518,6 @@ fn rolled_back(abandoned: Abandoned, workspace_id: &WorkspaceId) -> StorageError
         Abandoned::Found(state) => StorageError::rejecting(state, workspace_id),
         Abandoned::Failed(error) => StorageError::Driver(error),
         Abandoned::Integrity(error) => StorageError::Integrity(error),
+        Abandoned::History(error) => StorageError::History(error),
     }
 }

@@ -3,6 +3,7 @@ mod concurrency;
 mod content;
 mod existing;
 mod harness;
+mod history;
 mod lifecycle;
 mod support;
 mod upgrade;

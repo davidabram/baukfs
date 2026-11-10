@@ -18,6 +18,7 @@ pub enum DriverStep {
     Upgrade,
     InsertContent,
     ReadContent,
+    History,
     Commit,
     Rollback,
 }
@@ -34,6 +35,7 @@ impl fmt::Display for DriverStep {
             Self::Upgrade => "apply schema upgrade",
             Self::InsertContent => "insert content",
             Self::ReadContent => "read content",
+            Self::History => "workspace history",
             Self::Commit => "commit",
             Self::Rollback => "roll back",
         })
@@ -195,6 +197,7 @@ pub enum Abandoned {
     Found(DatabaseState),
     Failed(DriverError),
     Integrity(IntegrityError),
+    History(super::history::HistoryError),
 }
 
 impl fmt::Display for Abandoned {
@@ -203,12 +206,14 @@ impl fmt::Display for Abandoned {
             Self::Found(state) => write!(f, "found {state} under the write lock"),
             Self::Failed(error) => write!(f, "{error}"),
             Self::Integrity(error) => write!(f, "{error}"),
+            Self::History(error) => write!(f, "{error}"),
         }
     }
 }
 
 #[derive(Debug)]
 pub enum StorageError {
+    ConnectionDiscarded,
     NonUtf8Path {
         path: PathBuf,
     },
@@ -229,8 +234,9 @@ pub enum StorageError {
         stored: WorkspaceId,
     },
     Integrity(IntegrityError),
-    /// A write transaction was abandoned and the rollback also failed. For
-    /// initialization and upgrades the connection was discarded.
+    History(super::history::HistoryError),
+    /// A transaction was abandoned and the rollback also failed.
+    /// The connection was discarded.
     RollbackFailed {
         abandoned: Abandoned,
         rollback: DriverError,
@@ -249,7 +255,9 @@ impl StorageError {
                 abandoned: Abandoned::Failed(error),
                 ..
             } => Some(error),
-            Self::NonUtf8Path { .. }
+            Self::ConnectionDiscarded
+            | Self::History(_)
+            | Self::NonUtf8Path { .. }
             | Self::Missing
             | Self::Uninitialized
             | Self::UpgradeRequired { .. }
@@ -258,7 +266,7 @@ impl StorageError {
             | Self::WorkspaceMismatch { .. }
             | Self::Integrity(_)
             | Self::RollbackFailed {
-                abandoned: Abandoned::Found(_) | Abandoned::Integrity(_),
+                abandoned: Abandoned::Found(_) | Abandoned::Integrity(_) | Abandoned::History(_),
                 ..
             } => None,
         }
@@ -292,6 +300,9 @@ impl StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ConnectionDiscarded => {
+                f.write_str("connection discarded; reopen and reconcile history")
+            }
             Self::NonUtf8Path { path } => {
                 write!(f, "database path is not UTF-8: {}", path.display())
             }
@@ -308,6 +319,7 @@ impl fmt::Display for StorageError {
             ),
             Self::Unrecognized(reason) => write!(f, "unrecognized database: {reason}"),
             Self::Integrity(error) => write!(f, "{error}"),
+            Self::History(error) => write!(f, "{error}"),
             Self::WorkspaceMismatch { requested, stored } => write!(
                 f,
                 "database belongs to workspace {:?}, not {:?}",

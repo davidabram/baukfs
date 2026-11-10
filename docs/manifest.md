@@ -1,6 +1,6 @@
 # Filesystem manifest contract (T07)
 
-The `baukfs` crate provides a pure, in-memory manifest model. It performs no filesystem access, database queries, content reads, or symlink resolution. Schema version remains 2. Manifest persistence and atomic revision creation belong to T08.
+The `baukfs` crate provides a pure, in-memory manifest model. It performs no filesystem access, database queries, content reads, or symlink resolution. T08 persists these canonical encodings in schema version 3 and validates content references at the storage boundary (see `docs/storage.md`).
 
 ## Paths and symbolic links
 
@@ -71,8 +71,8 @@ Other pure deterministic tests cover input reordering, every identity-bearing fi
 
 ## Deferred responsibilities
 
-- **Content-reference validation:** ContentIds are references. Construction and decoding neither check database existence nor read or verify content bytes. A later boundary must ensure referenced content is available and valid before committing a revision.
-- **Persistence and revisions (T08):** no manifest tables, schema changes, persisted manifests, atomic revision creation, or workspace transition integration are provided here. ManifestId is not RevisionId.
+- **Content-reference validation:** ContentIds are references. Pure construction and decoding neither check database existence nor read content bytes. T08 storage verifies all distinct regular-file references before publishing a revision and on reads.
+- **Persistence and revisions (T08):** provided by `baukfs::storage`, separately from this pure module. ManifestId is not RevisionId.
 - **Capture:** no scanning, race detection, metadata capture policy, Git import, or symlink following is implemented.
 - **Restoration and cloning:** no disk writes, containment enforcement, platform filename compatibility, executable-mode policy, or restoration through symlinks is implemented. Valid Unix byte strings need not be usable on every filesystem.
 - **Resource policy:** the model holds entries and encoded output in memory. Input-bounded decoding prevents trusting declared lengths, but does not impose an application-specific size quota or promise recovery from allocator exhaustion.

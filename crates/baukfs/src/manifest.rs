@@ -349,6 +349,10 @@ impl Error for ManifestError {}
 pub struct ManifestId(ContentId);
 
 impl ManifestId {
+    pub(crate) fn from_digest(digest: [u8; 32]) -> Self {
+        Self(ContentId::from_digest(digest))
+    }
+
     /// # Errors
     /// Rejects text outside the canonical `b3:` plus 64 lowercase hex digit form.
     pub fn parse(text: &str) -> Result<Self, ManifestIdError> {

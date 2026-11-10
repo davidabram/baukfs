@@ -1,6 +1,6 @@
-# Workspace storage (T05, T06)
+# Workspace storage (T05–T08)
 
-`baukfs::storage` opens, identifies, initializes, and upgrades the local Turso database of one workspace copy, and stores immutable whole-file contents in it. Each copy has its own independent database. T05 covered identity, schema readiness, initialization, and opening. T06 adds content identity, schema version 2 with its explicit upgrade, and content insertion and reads. Manifests and revisions come later (see [Deferred responsibilities](#deferred-responsibilities)).
+`baukfs::storage` stores one independent workspace copy per local Turso database: immutable contents, canonical manifests, immutable revisions and lineage, and the workspace session/base/head/status. Database initialization and history initialization are separate operations. Schema version 3 can be current with no history.
 
 The domain modules (`WorkspaceId`, `ContentId`, `Workspace`, …) have no database code. Storage depends on them; they do not depend on storage.
 
@@ -21,11 +21,11 @@ The domain modules (`WorkspaceId`, `ContentId`, `Workspace`, …) have no databa
 | `DatabaseState` | `Missing`, `Uninitialized`, `Current(WorkspaceId)`, `UpgradeRequired { found, workspace_id }`, `UnsupportedSchemaVersion { found }`, or `Unrecognized(Unrecognized)`. |
 | `Unrecognized` | `NotADatabase`, `ForeignSchema` (schema objects present, no BaukFS metadata table), `IncompleteSchema` (known version but objects it requires are missing), `MalformedMetadata` (not exactly one well-formed metadata row). |
 | `BusyTimeout` | Per-connection lock-wait policy. `BusyTimeout::IMMEDIATE` or `BusyTimeout::new(Duration)`. |
-| `StorageError` | `NonUtf8Path`, `Driver(DriverError)`, `Missing`, `Uninitialized`, `UpgradeRequired { found }`, `UnsupportedSchemaVersion { found }`, `Unrecognized`, `WorkspaceMismatch { requested, stored }`, `Integrity(IntegrityError)`, `RollbackFailed { abandoned, rollback }`. |
+| `StorageError` | `ConnectionDiscarded`, `History(HistoryError)`, `NonUtf8Path`, `Driver(DriverError)`, `Missing`, `Uninitialized`, `UpgradeRequired { found }`, `UnsupportedSchemaVersion { found }`, `Unrecognized`, `WorkspaceMismatch { requested, stored }`, `Integrity(IntegrityError)`, `RollbackFailed { abandoned, rollback }`. |
 | `IntegrityError` | The `ContentId` and the `IntegrityViolation`: `MalformedRecord`, `LengthMismatch { recorded, stored }`, `DigestMismatch { computed }`, or `ConflictingContents`. Its fields are private. |
-| `Abandoned` | Why a write transaction was rolled back: `Found(DatabaseState)`, `Failed(DriverError)`, or `Integrity(IntegrityError)`. |
+| `Abandoned` | Why a write transaction was rolled back: `Found(DatabaseState)`, `Failed(DriverError)`, or `Integrity(IntegrityError)`, or `History(HistoryError)`. |
 | `DriverError` | The failing `DriverStep` and a `DriverErrorKind`, classified from the driver's error variant. Its fields are private. |
-| `CURRENT_SCHEMA_VERSION` | `2`. |
+| `CURRENT_SCHEMA_VERSION` | `3`. |
 
 All operations are `async fn`s that drive the driver's own futures. The library does not own a runtime, spawn threads, or use blocking wrappers. Callers supply the executor. The tests use a small spinning `block_on`.
 
@@ -101,7 +101,7 @@ BEGIN SELECT RAISE(ABORT, 'baukfs content is immutable'); END;
 - Deletion is not blocked, and no API deletes. Garbage collection is out of scope.
 - `byte_length` is deliberately not tied to `length(contents)` by a `CHECK`. Reads compare the two, so a damaged record is reported as an integrity error rather than being impossible to represent in tests.
 
-No manifest, revision, publication, or runner tables exist yet.
+Version 3 adds manifests, revisions, and workspace state as described below. Publication and runner tables remain deferred.
 
 ### Readiness classification
 
@@ -113,7 +113,7 @@ No manifest, revision, publication, or runner tables exist yet.
 4. Schema objects but no `baukfs_metadata` table: `Unrecognized(ForeignSchema)`.
 5. Not exactly one metadata row, or a non-integer version: `Unrecognized(MalformedMetadata)`.
 6. A version newer than `CURRENT_SCHEMA_VERSION`, or below 1: `UnsupportedSchemaVersion { found }`.
-7. Any object that version requires is missing: `Unrecognized(IncompleteSchema)`. Version 1 requires the metadata table and its three triggers. Version 2 also requires the content table and its two triggers.
+7. Any object that version requires is missing: `Unrecognized(IncompleteSchema)`. Version 1 requires the metadata table and its three triggers. Version 2 also requires the content table and its two triggers. Version 3 additionally requires its three history tables and nine triggers.
 8. An identity that is not text or not a valid `WorkspaceId`: `Unrecognized(MalformedMetadata)`.
 9. An older known version: `UpgradeRequired { found, workspace_id }`.
 10. Otherwise: `Current(workspace_id)`.
@@ -163,7 +163,7 @@ The identity row is never rewritten. Its triggers stay in place, and only `schem
 
 Insertion is idempotent and safe across processes. Parallel inserters of the same bytes serialize on the write lock. Exactly one records `Inserted`, and every other one records `AlreadyPresent`.
 
-If `COMMIT` fails during an insert, the outcome is uncertain. The store keeps its connection: Turso marks the unfinished transaction as dangling and rolls it back on the connection's next use. Repeating the insert is safe because insertion is idempotent.
+If `COMMIT` fails during an insert, the outcome is uncertain. T08 discards the connection and leaves the handle unusable. Reopen, verify the content, and retry the idempotent insert if necessary; never depend on a dangling transaction being cleaned up by the next operation.
 
 ## Creation versus existing-only opening
 
@@ -202,7 +202,7 @@ A store handle is returned only after the read-write connection has read the dat
 
 ## Initialization atomicity and contention
 
-Initialization, upgrades, and content insertion share one helper that runs work under a checked `BEGIN IMMEDIATE` transaction (`Connection::transaction_with_behavior`, which needs `&mut Connection`). The helper ends every path with an explicit `COMMIT` or `ROLLBACK`.
+Initialization, upgrades, content insertion, and history writes share one checked helper that runs work under a checked `BEGIN IMMEDIATE` transaction (`Connection::transaction_with_behavior`, which needs `&mut Connection`). The helper attempts an explicit `COMMIT` or `ROLLBACK` on every completed path. History reads use the same checked boundary with `BEGIN DEFERRED` for one consistent snapshot.
 
 Initialization runs on one connection, which `create` borrows mutably:
 
@@ -219,7 +219,7 @@ Every path ends in an explicit `COMMIT` or `ROLLBACK`.
 - The schema and the metadata row are created in one transaction, so they become visible together or not at all.
 - A failed bootstrap step is returned as `Driver { step: Bootstrap, .. }` after a successful rollback.
 - If the rollback itself fails, `RollbackFailed { abandoned, rollback }` keeps both errors. `abandoned` is `Found(DatabaseState)` (the state seen under the lock), `Failed(DriverError)`, or `Integrity(IntegrityError)` (inserts only). These enums are flat, so no error nests another `StorageError` and nothing is boxed.
-- On any error, including a failed `COMMIT`, the connection is dropped rather than returned. After a failed `COMMIT` the outcome is uncertain, and the caller should run `inspect`.
+- On any error, including a failed `COMMIT`, the connection is dropped rather than returned. After a failed `COMMIT` the outcome is uncertain. Inspect schema state for schema writes; reopen and read validated workspace history for history writes.
 
 Concurrent initializers:
 
@@ -249,16 +249,103 @@ Integration tests in `crates/baukfs/tests/storage/`:
 
 The `create` children wait at a start barrier (`ready`, then `go` on stdin), so the parallel creators really overlap. That overlap is what exposed the coordination-file race.
 
-Process tests re-run the test binary as a child (`child_process_entry`, chosen by environment variables), so they need no extra binary crate. Child roles are `create`, `upgrade`, `insert`, `observe` (inspect in a loop until current and report each distinct state), and `hold`. The harness (`harness.rs`), adapted from the T03 spike's, gives each child one deadline (1 minute) covering every line and its exit. It reads stdout and stderr on separate threads, kills and reaps the child on failure or drop, and reports typed errors that include the child's stderr. The only sleep is the 250 ms hold in the queued-creator and queued-upgrader tests. The assertions do not depend on it: while the lock is held, no creator may have finished, and the outcome invariants hold however the waiters are scheduled.
+Process tests re-run the test binary as a child (`child_process_entry`, chosen by environment variables), so they need no extra binary crate. Child roles are `create`, `upgrade`, `insert`, `advance-a`, `advance-b`, `observe` (inspect in a loop until current and report each distinct state), and `hold`. The harness (`harness.rs`), adapted from the T03 spike's, gives each child one deadline (1 minute) covering every line and its exit. It reads stdout and stderr on separate threads, kills and reaps the child on failure or drop, and reports typed errors that include the child's stderr. The only sleep is the 250 ms hold in the queued-creator and queued-upgrader tests. The assertions do not depend on it: while the lock is held, no creator may have finished, and the outcome invariants hold however the waiters are scheduled.
+
+## Schema version 3 and history API (T08)
+
+The ordered 2→3 upgrade adds:
+
+```sql
+CREATE TABLE baukfs_manifests (
+    digest BLOB PRIMARY KEY NOT NULL CHECK (length(digest) = 32),
+    encoding BLOB NOT NULL
+) STRICT;
+CREATE TABLE baukfs_revisions (
+    id TEXT PRIMARY KEY NOT NULL,
+    manifest BLOB NOT NULL CHECK (length(manifest) = 32),
+    parent TEXT
+) STRICT;
+CREATE TABLE baukfs_workspace (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    session TEXT NOT NULL,
+    base TEXT NOT NULL,
+    head TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('idle', 'running', 'sealed'))
+) STRICT;
+```
+
+Each history table has `insert_once`, `immutable`, and `undeletable` triggers, named `<table>_<suffix>`. Insert triggers reject a duplicate key before conflict resolution, including `INSERT OR REPLACE`. Manifest and revision updates and deletes are rejected. The workspace update trigger rejects updates of `session`, `base`, or `singleton`; its head and status columns remain writable. No public API changes persisted status in T08. The workspace identity remains in the unchanged metadata row. No foreign-key enforcement is assumed: reference checks run at the application boundary inside the transaction.
+
+Fresh creation uses bootstrap→2→3. Upgrade from version 2 preserves identity and content and creates empty history tables. Inspection, existing-only opening, and `create` against an old database remain non-migrating.
+
+| Public API | Result / behavior |
+| --- | --- |
+| `initialize_history(&mut self, &SessionId, &Manifest)` | `(Workspace, HistoryOutcome::Initialized)` after commit, or `AlreadyApplied` for an identical existing idle root. |
+| `advance_head(&mut self, &RevisionId, &Manifest)` | `(Workspace, HistoryOutcome::Advanced)` after commit, or a verified `AlreadyApplied` retry. |
+| `read_workspace(&mut self)` | `Option<Workspace>`; `None` means history is not initialized. |
+| `read_revision(&mut self, &RevisionId)` | `Option<Revision>`; validates the record and complete ancestry. |
+| `read_manifest(&mut self, &ManifestId)` | `Option<Manifest>`; validates canonical encoding, identity, and contents. |
+| `Revision::{id, manifest, parent}` | Borrowed access to private immutable fields. No public revision constructor or setters. |
+| `HistoryError` | Typed missing references, malformed records, manifest decoding/identity and revision identity failures, conflicting records, invalid lineage, initialization conflicts, lifecycle transitions, and stale heads with expected/actual IDs. Wrapped by `StorageError::History` and `Abandoned::History`. |
+| `StorageError::ConnectionDiscarded` | Reopen and reconcile before doing more database work on this handle. |
+
+The read methods need exclusive connection access for a checked `BEGIN DEFERRED` snapshot. They do not write records or schema. Missing requested objects return `None`; missing required references return typed errors. Content failures reuse existing `IntegrityError` and its length/digest classifications. A repeated content digest within a manifest is checked once. Revision reads iteratively verify every parent and its manifest/content references; workspace reads additionally require that the ultimate root equals the persisted base. A visited-ID set rejects cycles without recursive or erased futures.
+
+### Revision identity: encoding version 1
+
+The identity preimage is the following exact concatenation, with no padding or terminator beyond the stated domain NUL:
+
+| Field | Encoding |
+| --- | --- |
+| Domain | 16 bytes, ASCII `baukfs-revision` followed by one NUL |
+| Version | u32 little-endian, value 1 |
+| Manifest | 32 raw ManifestId digest bytes |
+| Parent presence | One byte: 0 for root, 1 for a child |
+| Parent, only when present | UTF-8 byte length as u64 little-endian, then the exact `RevisionId::as_str()` UTF-8 bytes |
+
+The identifier is `rb3:` followed by the ordinary BLAKE3 hash of the entire preimage as 64 lowercase hexadecimal digits. A root preimage is exactly 53 bytes. There is no hidden derive-key context. The parent text is length-framed to retain the opaque domain API; store-generated parents have the canonical 68-byte spelling above. No clock, randomness, session, workspace identity, status, or diagnostic text participates. Identical histories can have identical IDs in independent databases; existence is local to each database. `RevisionId::new` keeps accepting opaque identifiers and does not prove storage existence. A golden framing test fixes both the root and child preimages.
+
+### Initialization transaction
+
+`initialize_history` acquires checked `BEGIN IMMEDIATE`, then reads and validates any existing workspace and history. An identical session, root manifest, base/head at that root, and Idle status returns `AlreadyApplied` after verifying all matching records. Any other existing initialized state returns `InitializationConflict`; initialization after head advancement is therefore a conflict, even with the original manifest and session.
+
+For an uninitialized history it checks every distinct regular-file content reference using the content integrity verifier, persists or verifies the canonical manifest, persists or verifies the deterministic root revision, and inserts the workspace with `base == head == root` and `Idle`. All steps commit together. There is no Git import or filesystem scan.
+
+### Head transaction and retries
+
+`advance_head` acquires checked `BEGIN IMMEDIATE`, reads and validates persisted state, and uses T02's `record_checkpoint` transition on a private temporary value to require Idle. Running and Sealed reject advancement, including retries. It computes the target from the supplied manifest and expected head.
+
+When current head equals expected, the operation validates contents and parent, persists or verifies the manifest and child revision, then executes:
+
+```sql
+UPDATE baukfs_workspace SET head = ?target
+WHERE singleton = 1 AND head = ?expected AND status = 'idle';
+```
+
+Exactly one affected row is required; any other count returns `HeadCompareAndSwapFailed` and rolls back. Session and base remain unchanged. All values are bound parameters. The write lock covers validation, persistence, and the compare-and-swap. Two different targets from the same expected head cannot both advance it. A rejected operation rolls back any new manifest/revision and leaves existing contents untouched.
+
+When current head differs from expected, only a current head equal to the computed target can return `AlreadyApplied`, after complete revision, parent, canonical manifest, and content verification and exact comparison. All other cases return `StaleHead`. Retrying the original request after a later revision has advanced returns a conflict. There are no persisted request receipts, so this is state-based retry recognition, not exactly-once request handling.
+
+The caller receives the temporary `Workspace` only after commit. Caller-visible domain values are never mutated speculatively.
+
+### Uncertain outcomes and cancellation
+
+The store temporarily takes ownership of its private connection for content writes and history transactions. It returns the connection to the handle only after acknowledged commit or successful rollback. A begin/commit failure, rollback failure, or cancellation after taking the connection drops it and leaves the handle discarded. Subsequent storage operations fail with `ConnectionDiscarded` (identity and timeout accessors remain usable). `RollbackFailed` retains both typed reasons without boxing or erased error traversal. A failed commit never returns speculative success.
+
+After any uncertain outcome, reopen with the same workspace identity and read the validated workspace/revision/manifest state. Retry using the original expected head and manifest: it can produce `Advanced`, a fully verified `AlreadyApplied`, or `StaleHead` if another writer has moved on. Schema `inspect` alone cannot reconcile a history commit. Driver power-loss durability remains a separate platform concern.
+
+### T08 verification
+
+History tests cover root initialization and reopening, multiple revisions preserving base/session/parents, manifest deduplication, missing and corrupted references, invalid encoding and identity, idempotent and conflicting initialization, stale heads and retries, Running/Sealed fixtures, independent databases, and version-2 upgrade with existing content. Trigger-injected failures before manifest insertion, revision insertion, workspace insertion, and head update leave no partial history. A zero-row compare-and-swap fixture also rolls back the new manifest/revision.
+
+Two integration-test child processes start behind the existing bounded barrier and compete from one expected head: exactly one advances and the other reports stale. Unit process tests place a test-only checkpoint after persistence and before commit, or wait after the public API acknowledges commit. Both root initialization and advancement are killed at each boundary. Before commit, readers see only old state and reopening exposes none of the new manifest/revision/head; after acknowledged commit, reopening verifies both the revision and head. The unit harness uses the existing bounded-process techniques: concurrent stdout/stderr draining, a 30-second checkpoint deadline, and kill/reap on drop. Hooks are absent from non-test builds. Commit and rollback fault tests verify discarded handles and successful reconciliation through a fresh open.
 
 ## Deferred responsibilities
 
-- **T07 and later:**
-  - Filesystem scanning, manifests, revisions, checkpoints, cloning, runner integration, and publication. Their tables arrive as further numbered upgrade steps.
-  - Revision persistence that is atomic with workspace transitions.
-  - Crash recovery and the process-kill matrix for revision commits.
-- **Content storage limits.** Whole files are held in memory on insert and read, and stored as single BLOBs, with no streaming, chunking, compression, size limit beyond the driver's, or garbage collection. Content is not referenced by anything yet, so nothing protects records from deletion through raw SQL.
-- **Operation deadlines and workspace serialization.** Multiprocess WAL protects the file, but it does not serialize workspace-mutating operations.
+- **T09 and later:** filesystem scanning, restoration, cloning, runner integration, sealing, and publication. No new CLI commands are added by T08.
+- **History validation cost.** Reads and head writes verify complete ancestry and its content references. There is no validation cache or application-level history quota; verification cost grows with history and content size.
+- **Content storage limits.** Whole files are held in memory on insert and read, and stored as single BLOBs, with no streaming, chunking, compression, size limit beyond the driver's, or garbage collection. Manifests reference content, but raw SQL can still delete content. Reads and history writes reject missing references.
+- **Operation deadlines and workspace serialization.** Multiprocess WAL plus `BEGIN IMMEDIATE` and an explicit head compare-and-swap serialize the implemented workspace writes. Whole-operation deadlines remain the caller’s responsibility.
 - **Choosing database paths.** Keeping them outside the agent-writable working directory is the caller's job; storage only receives a path.
 - **Platforms.** All storage tests, including T06's, have run only on x86_64-linux. aarch64-linux and aarch64-darwin are compile and evaluation targets until they are run natively (see `docs/turso-compatibility.md`, Remaining platform verification).
 - **Durability.** `PRAGMA fullfsync` on macOS, and durability across power loss and OS crashes, remain open from T03.

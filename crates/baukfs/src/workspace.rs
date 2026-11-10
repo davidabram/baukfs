@@ -78,6 +78,23 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn from_stored(
+        id: WorkspaceId,
+        session: SessionId,
+        base: RevisionId,
+        head: RevisionId,
+        status: WorkspaceStatus,
+    ) -> Result<Self, TransitionError> {
+        let mut workspace = Self::new(id, session, base);
+        workspace.record_checkpoint(head)?;
+        match status {
+            WorkspaceStatus::Idle => {}
+            WorkspaceStatus::Running => workspace.begin_run()?,
+            WorkspaceStatus::Sealed => workspace.seal()?,
+        }
+        Ok(workspace)
+    }
+
     #[must_use]
     pub fn id(&self) -> &WorkspaceId {
         &self.id

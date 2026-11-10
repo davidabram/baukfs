@@ -6,7 +6,7 @@ use crate::WorkspaceId;
 
 use super::error::{DriverError, DriverErrorKind, DriverStep};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 /// The version the bootstrap creates. Every later version is reached by the
 /// ordered steps in [`UPGRADES`].
@@ -19,7 +19,7 @@ type SchemaObject = (&'static str, &'static str);
 /// Schema objects each version introduces, as `(type, name)`. Entry `i`
 /// belongs to version `i + 1`; a database at version `v` must contain every
 /// object of entries `0..v`.
-const INTRODUCED_OBJECTS: [&[SchemaObject]; 2] = [
+const INTRODUCED_OBJECTS: [&[SchemaObject]; 3] = [
     &[
         ("table", METADATA_TABLE),
         ("trigger", "baukfs_metadata_single_row"),
@@ -30,6 +30,20 @@ const INTRODUCED_OBJECTS: [&[SchemaObject]; 2] = [
         ("table", "baukfs_content"),
         ("trigger", "baukfs_content_insert_once"),
         ("trigger", "baukfs_content_immutable"),
+    ],
+    &[
+        ("table", "baukfs_manifests"),
+        ("table", "baukfs_revisions"),
+        ("table", "baukfs_workspace"),
+        ("trigger", "baukfs_manifests_insert_once"),
+        ("trigger", "baukfs_manifests_undeletable"),
+        ("trigger", "baukfs_manifests_immutable"),
+        ("trigger", "baukfs_revisions_insert_once"),
+        ("trigger", "baukfs_revisions_undeletable"),
+        ("trigger", "baukfs_revisions_immutable"),
+        ("trigger", "baukfs_workspace_insert_once"),
+        ("trigger", "baukfs_workspace_undeletable"),
+        ("trigger", "baukfs_workspace_immutable"),
     ],
 ];
 
@@ -124,8 +138,47 @@ const VERSION_2: [SchemaStep; 3] = [
     ),
 ];
 
+const VERSION_3: [SchemaStep; 12] = [
+    SchemaStep::Execute(
+        "CREATE TABLE baukfs_manifests (digest BLOB PRIMARY KEY NOT NULL CHECK (length(digest) = 32), encoding BLOB NOT NULL) STRICT",
+    ),
+    SchemaStep::Execute(
+        "CREATE TABLE baukfs_revisions (id TEXT PRIMARY KEY NOT NULL, manifest BLOB NOT NULL CHECK (length(manifest) = 32), parent TEXT) STRICT",
+    ),
+    SchemaStep::Execute(
+        "CREATE TABLE baukfs_workspace (singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1), session TEXT NOT NULL, base TEXT NOT NULL, head TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('idle', 'running', 'sealed'))) STRICT",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_manifests_insert_once BEFORE INSERT ON baukfs_manifests WHEN EXISTS (SELECT 1 FROM baukfs_manifests WHERE digest = NEW.digest) BEGIN SELECT RAISE(ABORT, 'immutable history record'); END",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_manifests_undeletable BEFORE DELETE ON baukfs_manifests BEGIN SELECT RAISE(ABORT, 'immutable history record'); END",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_manifests_immutable BEFORE UPDATE ON baukfs_manifests BEGIN SELECT RAISE(ABORT, 'immutable history record'); END",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_revisions_insert_once BEFORE INSERT ON baukfs_revisions WHEN EXISTS (SELECT 1 FROM baukfs_revisions WHERE id = NEW.id) BEGIN SELECT RAISE(ABORT, 'immutable history record'); END",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_revisions_undeletable BEFORE DELETE ON baukfs_revisions BEGIN SELECT RAISE(ABORT, 'immutable history record'); END",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_revisions_immutable BEFORE UPDATE ON baukfs_revisions BEGIN SELECT RAISE(ABORT, 'immutable history record'); END",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_workspace_insert_once BEFORE INSERT ON baukfs_workspace WHEN EXISTS (SELECT 1 FROM baukfs_workspace WHERE singleton = NEW.singleton) BEGIN SELECT RAISE(ABORT, 'immutable history record'); END",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_workspace_undeletable BEFORE DELETE ON baukfs_workspace BEGIN SELECT RAISE(ABORT, 'immutable history record'); END",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_workspace_immutable BEFORE UPDATE OF session, base, singleton ON baukfs_workspace BEGIN SELECT RAISE(ABORT, 'immutable history record'); END",
+    ),
+];
+
 /// Entry `i` upgrades version `i + 1` to `i + 2`.
-const UPGRADES: [&[SchemaStep]; 1] = [&VERSION_2];
+const UPGRADES: [&[SchemaStep]; 2] = [&VERSION_2, &VERSION_3];
 
 const INSERT_METADATA: &str =
     "INSERT INTO baukfs_metadata (singleton, schema_version, workspace_id) VALUES (1, ?1, ?2)";

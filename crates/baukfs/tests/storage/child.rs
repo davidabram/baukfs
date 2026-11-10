@@ -37,6 +37,8 @@ pub fn run_if_requested() {
     let database = PathBuf::from(env::var_os(DATABASE).expect("child database path"));
     match role.as_str() {
         "create" => create(&database),
+        "advance-a" => advance(&database, false),
+        "advance-b" => advance(&database, true),
         "upgrade" => upgrade(&database),
         "insert" => insert(&database),
         "observe" => observe(&database),
@@ -84,6 +86,34 @@ fn failure(error: StorageError) -> String {
         }
         StorageError::Driver(error) => format!("driver {:?} {:?}", error.step(), error.kind()),
         error => format!("failed {error}"),
+    }
+}
+
+fn advance(database: &Path, second: bool) {
+    let mut store = block_on(WorkspaceStore::open_existing(
+        database,
+        &workspace_id(),
+        busy_timeout(),
+    ))
+    .expect("open");
+    let expected = block_on(store.read_workspace())
+        .expect("read workspace")
+        .expect("initialized")
+        .head()
+        .clone();
+    let bytes = if second {
+        b"candidate-b"
+    } else {
+        b"candidate-a"
+    };
+    let manifest = crate::history::file_manifest(bytes);
+    await_start();
+    match block_on(store.advance_head(&expected, &manifest)) {
+        Ok((_, baukfs::storage::HistoryOutcome::Advanced)) => report("advanced"),
+        Err(StorageError::History(baukfs::storage::HistoryError::StaleHead { .. })) => {
+            report("stale");
+        }
+        other => panic!("unexpected advancement: {other:?}"),
     }
 }
 
@@ -200,6 +230,15 @@ pub struct Starter {
 }
 
 impl Starter {
+    pub fn advance(database: &Path, second: bool) -> Self {
+        Self::spawn(
+            if second { "advance-b" } else { "advance-a" },
+            database,
+            "ws",
+            Duration::from_secs(10),
+        )
+    }
+
     pub fn create(database: &Path, workspace_id: &str, busy_timeout: Duration) -> Self {
         Self::spawn("create", database, workspace_id, busy_timeout)
     }

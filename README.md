@@ -35,13 +35,13 @@ Implemented:
 - Workspace storage foundation in `baukfs::storage`: one local Turso database per workspace copy, always opened in multiprocess WAL mode. Covers explicit creation, existing-only opening, read-only inspection, and workspace identity (see `docs/storage.md`).
 - Content identity: `ContentId`, the BLAKE3 digest of the exact bytes, written as `b3:` plus 64 lowercase hex digits.
 - Immutable, content-addressed storage of whole-file bytes (schema version 2): idempotent, cross-process-safe insertion that never overwrites, and reads that verify length and digest before returning bytes, with typed integrity errors.
-- Explicit, atomic schema upgrade from version 1 (`WorkspaceStore::upgrade`). Inspection and normal opening never migrate.
+- Explicit, atomic schema upgrades from versions 1 and 2 (`WorkspaceStore::upgrade`). Inspection and normal opening never migrate.
 - Validated filesystem manifest domain model (T07): raw-byte workspace paths and symlink targets, explicit directories, deterministic binary encoding, strict decoding, and domain-separated BLAKE3 `ManifestId` (see `docs/manifest.md`).
+- Persistent canonical manifests, immutable revision lineage, and atomic workspace history (T08, schema version 3): validated root initialization, idle-only head compare-and-swap, verified retries, and typed conflicts (see `docs/storage.md`).
 
 Planned, not implemented:
 
-- Filesystem scanning and Turso-backed manifests.
-- Immutable revisions and lineage, and their persistence.
+- Filesystem scanning and capture.
 - Working-directory cloning, runners, confinement, and Git publication.
 
 ## Supported systems
