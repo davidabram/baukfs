@@ -53,6 +53,7 @@
             commonArgs
             // {
               inherit cargoArtifacts;
+              cargoExtraArgs = "--locked -p baukfs-cli";
               doCheck = false;
               doInstallCheck = true;
               installCheckPhase = ''

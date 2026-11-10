@@ -31,6 +31,7 @@ Implemented:
 - In-memory workspace domain model: identifiers, lifecycle transitions, and typed errors (see `docs/domain-contract.md`).
 - Architecture rules (see `AGENTS.md`) enforced by `architecture/check.sh`, its fixture self-test, and `clippy.toml`.
 - Independent Nix checks for build, formatting, Clippy, tests, and architecture.
+- Turso driver compatibility spike in `crates/baukfs-turso-spike` (not shipped; see `docs/turso-compatibility.md`).
 
 Planned, not implemented:
 
