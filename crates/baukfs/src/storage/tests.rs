@@ -7,7 +7,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 
+use super::schema::{BOOTSTRAP, SchemaStep};
 use super::*;
+
+/// A second metadata insert, rejected by the single-row trigger.
+const FAILING_STEP: SchemaStep = SchemaStep::Execute(
+    "INSERT INTO baukfs_metadata (singleton, schema_version, workspace_id) \
+     VALUES (1, 1, 'second')",
+);
 
 /// Polls until ready. The driver may return `Pending` without waking, so a
 /// spinning poll is the simplest correct executor for these tests.
@@ -65,13 +72,18 @@ fn injected_bootstrap_failure_rolls_back_schema_and_metadata_together() {
     let dir = TestDir::new("injected-failure");
     let path = dir.database();
     let mut connection = read_write(&path);
-    let mut failing = BOOTSTRAP.to_vec();
-    failing.push(BootstrapStep::Execute(
-        "INSERT INTO baukfs_metadata (singleton, schema_version, workspace_id) \
-         VALUES (1, 1, 'second')",
-    ));
+    let failing_upgrades: Vec<&[SchemaStep]> = SCHEMA
+        .upgrades
+        .iter()
+        .copied()
+        .chain([[FAILING_STEP].as_slice()])
+        .collect();
+    let failing = Schema {
+        upgrades: &failing_upgrades,
+        ..SCHEMA
+    };
 
-    let result = block_on(initialize(&mut connection, &workspace("ws-a"), &failing));
+    let result = block_on(initialize(&mut connection, &workspace("ws-a"), failing));
 
     let Err(StorageError::Driver(error)) = result else {
         panic!("expected a driver failure, got {result:?}");
@@ -83,7 +95,7 @@ fn injected_bootstrap_failure_rolls_back_schema_and_metadata_together() {
     assert_eq!(state(&path), DatabaseState::Uninitialized);
 
     let mut connection = read_write(&path);
-    let outcome = block_on(initialize(&mut connection, &workspace("ws-a"), &BOOTSTRAP));
+    let outcome = block_on(initialize(&mut connection, &workspace("ws-a"), SCHEMA));
     assert_eq!(
         outcome.expect("initialize after rollback"),
         CreateOutcome::Created
@@ -99,16 +111,16 @@ fn initializer_rechecks_state_after_taking_the_write_lock() {
     let mut other = read_write(&path);
     assert_eq!(state(&path), DatabaseState::Uninitialized);
 
-    let won = block_on(initialize(&mut winner, &workspace("ws-a"), &BOOTSTRAP));
+    let won = block_on(initialize(&mut winner, &workspace("ws-a"), SCHEMA));
     assert_eq!(won.expect("winner"), CreateOutcome::Created);
 
-    let converged = block_on(initialize(&mut same, &workspace("ws-a"), &BOOTSTRAP));
+    let converged = block_on(initialize(&mut same, &workspace("ws-a"), SCHEMA));
     assert_eq!(
         converged.expect("same identity"),
         CreateOutcome::InitializedConcurrently
     );
 
-    let conflicting = block_on(initialize(&mut other, &workspace("ws-b"), &BOOTSTRAP));
+    let conflicting = block_on(initialize(&mut other, &workspace("ws-b"), SCHEMA));
     match conflicting {
         Err(StorageError::WorkspaceMismatch { requested, stored }) => {
             assert_eq!(requested.as_str(), "ws-b");
@@ -117,4 +129,118 @@ fn initializer_rechecks_state_after_taking_the_write_lock() {
         unexpected => panic!("expected a workspace mismatch, got {unexpected:?}"),
     }
     assert_eq!(state(&path), DatabaseState::Current(workspace("ws-a")));
+}
+
+/// Builds a version-1 database the way the version-1 binary did.
+fn version_1(path: &Path, workspace_id: &WorkspaceId) {
+    let mut connection = read_write(path);
+    let transaction =
+        block_on(connection.transaction_with_behavior(TransactionBehavior::Immediate))
+            .expect("begin");
+    block_on(apply_steps(
+        &transaction,
+        BOOTSTRAP,
+        1,
+        workspace_id,
+        DriverStep::Bootstrap,
+    ))
+    .expect("version-1 bootstrap");
+    block_on(transaction.commit()).expect("commit");
+}
+
+fn object_names(path: &Path) -> Vec<String> {
+    let connection = read_write(path);
+    let mut rows = block_on(connection.query("SELECT name FROM sqlite_schema ORDER BY name", ()))
+        .expect("query");
+    let mut names = Vec::new();
+    while let Some(row) = block_on(rows.next()).expect("row") {
+        match row.get_value(0).expect("value") {
+            turso::Value::Text(name) => names.push(name),
+            other => panic!("unexpected object name {other:?}"),
+        }
+    }
+    names
+}
+
+#[test]
+fn schema_tables_agree_with_the_current_version() {
+    assert_eq!(
+        usize::try_from(CURRENT_SCHEMA_VERSION).expect("positive version"),
+        SCHEMA.upgrades.len() + 1
+    );
+    assert!(SCHEMA.upgrade_steps(CURRENT_SCHEMA_VERSION).is_none());
+    assert!(SCHEMA.upgrade_steps(0).is_none());
+    assert!(SCHEMA.upgrade_steps(CURRENT_SCHEMA_VERSION + 1).is_none());
+    assert_eq!(
+        SCHEMA.upgrade_steps(1).map(Iterator::count),
+        Some(SCHEMA.upgrades.iter().map(|steps| steps.len()).sum())
+    );
+}
+
+#[test]
+fn injected_upgrade_failure_leaves_version_1_intact() {
+    let dir = TestDir::new("injected-upgrade-failure");
+    let path = dir.database();
+    let id = workspace("ws-a");
+    version_1(&path, &id);
+    let before = object_names(&path);
+    let old = DatabaseState::UpgradeRequired {
+        found: 1,
+        workspace_id: id.clone(),
+    };
+    assert_eq!(state(&path), old);
+
+    let mut failing_step: Vec<SchemaStep> = SCHEMA.upgrades[0].to_vec();
+    failing_step.push(FAILING_STEP);
+    let failing_upgrades = [failing_step.as_slice()];
+    let failing = Schema {
+        upgrades: &failing_upgrades,
+        ..SCHEMA
+    };
+    let mut connection = read_write(&path);
+    let result = block_on(upgrade(&mut connection, &id, failing));
+
+    let Err(StorageError::Driver(error)) = result else {
+        panic!("expected a driver failure, got {result:?}");
+    };
+    assert_eq!(error.step(), DriverStep::Upgrade);
+    assert_eq!(error.kind(), DriverErrorKind::Other, "{error}");
+    drop(connection);
+    assert_eq!(state(&path), old);
+    assert_eq!(object_names(&path), before);
+
+    let mut connection = read_write(&path);
+    let upgraded = block_on(upgrade(&mut connection, &id, SCHEMA));
+    assert_eq!(
+        upgraded.expect("upgrade after rollback"),
+        UpgradeOutcome::Upgraded { from: 1 }
+    );
+    assert_eq!(state(&path), DatabaseState::Current(id));
+}
+
+#[test]
+fn upgrader_rechecks_state_after_taking_the_write_lock() {
+    let dir = TestDir::new("upgrade-recheck");
+    let path = dir.database();
+    let id = workspace("ws-a");
+    version_1(&path, &id);
+    let mut winner = read_write(&path);
+    let mut late = read_write(&path);
+    let mut other = read_write(&path);
+
+    let won = block_on(upgrade(&mut winner, &id, SCHEMA));
+    assert_eq!(won.expect("winner"), UpgradeOutcome::Upgraded { from: 1 });
+    let converged = block_on(upgrade(&mut late, &id, SCHEMA));
+    assert_eq!(
+        converged.expect("late upgrader"),
+        UpgradeOutcome::UpgradedConcurrently
+    );
+    match block_on(upgrade(&mut other, &workspace("ws-b"), SCHEMA)) {
+        Err(StorageError::WorkspaceMismatch { requested, stored }) => {
+            assert_eq!(requested.as_str(), "ws-b");
+            assert_eq!(stored.as_str(), "ws-a");
+        }
+        unexpected => panic!("expected a workspace mismatch, got {unexpected:?}"),
+    }
+    assert_eq!(state(&path), DatabaseState::Current(id));
 }

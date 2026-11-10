@@ -1,7 +1,9 @@
+mod content;
 mod id;
 pub mod storage;
 mod workspace;
 
+pub use content::{ContentId, ContentIdError};
 pub use id::{IdError, IdKind, RevisionId, SessionId, WorkspaceId};
 pub use workspace::{Operation, TransitionError, Workspace, WorkspaceStatus};
 

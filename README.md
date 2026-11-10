@@ -32,11 +32,14 @@ Implemented:
 - Architecture rules (see `AGENTS.md`) enforced by `architecture/check.sh`, its fixture self-test, and `clippy.toml`.
 - Independent Nix checks for build, formatting, Clippy, tests, and architecture.
 - Turso driver compatibility spike in `crates/baukfs-turso-spike` (not shipped; see `docs/turso-compatibility.md`).
-- Workspace storage foundation in `baukfs::storage`: one local Turso database per workspace copy, always opened in multiprocess WAL mode. Covers explicit creation, existing-only opening, read-only inspection, workspace identity, and the version-1 bootstrap schema (see `docs/storage.md`).
+- Workspace storage foundation in `baukfs::storage`: one local Turso database per workspace copy, always opened in multiprocess WAL mode. Covers explicit creation, existing-only opening, read-only inspection, and workspace identity (see `docs/storage.md`).
+- Content identity: `ContentId`, the BLAKE3 digest of the exact bytes, written as `b3:` plus 64 lowercase hex digits.
+- Immutable, content-addressed storage of whole-file bytes (schema version 2): idempotent, cross-process-safe insertion that never overwrites, and reads that verify length and digest before returning bytes, with typed integrity errors.
+- Explicit, atomic schema upgrade from version 1 (`WorkspaceStore::upgrade`). Inspection and normal opening never migrate.
 
 Planned, not implemented:
 
-- Turso-backed storage of file contents and manifests.
+- Filesystem scanning and Turso-backed manifests.
 - Immutable revisions and lineage, and their persistence.
 - Working-directory cloning, runners, confinement, and Git publication.
 

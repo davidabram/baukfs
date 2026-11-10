@@ -3,7 +3,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use crate::WorkspaceId;
+use crate::{ContentId, WorkspaceId};
 
 use super::{CURRENT_SCHEMA_VERSION, DatabaseState, Unrecognized};
 
@@ -15,6 +15,9 @@ pub enum DriverStep {
     ReadState,
     Begin,
     Bootstrap,
+    Upgrade,
+    InsertContent,
+    ReadContent,
     Commit,
     Rollback,
 }
@@ -28,6 +31,9 @@ impl fmt::Display for DriverStep {
             Self::ReadState => "read database state",
             Self::Begin => "begin immediate transaction",
             Self::Bootstrap => "apply bootstrap schema",
+            Self::Upgrade => "apply schema upgrade",
+            Self::InsertContent => "insert content",
+            Self::ReadContent => "read content",
             Self::Commit => "commit",
             Self::Rollback => "roll back",
         })
@@ -118,13 +124,77 @@ impl fmt::Display for DriverError {
 
 impl Error for DriverError {}
 
-/// Why an initialization transaction was being rolled back.
+/// How a stored content record disagrees with its identifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntegrityViolation {
+    /// The row does not hold an integer length and a BLOB.
+    MalformedRecord,
+    /// The recorded byte length differs from the length of the stored bytes.
+    LengthMismatch { recorded: i64, stored: usize },
+    /// The stored bytes hash to a different identifier.
+    DigestMismatch { computed: ContentId },
+    /// The stored bytes hash to the identifier but differ from the bytes
+    /// being inserted. Only a BLAKE3 collision produces this.
+    ConflictingContents,
+}
+
+impl fmt::Display for IntegrityViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MalformedRecord => f.write_str("malformed content record"),
+            Self::LengthMismatch { recorded, stored } => write!(
+                f,
+                "recorded length {recorded} differs from stored length {stored}"
+            ),
+            Self::DigestMismatch { computed } => {
+                write!(f, "stored bytes hash to {computed}")
+            }
+            Self::ConflictingContents => f.write_str("stored bytes differ from the inserted bytes"),
+        }
+    }
+}
+
+/// A stored content record that does not match its identifier. Its bytes are
+/// never returned as valid content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntegrityError {
+    id: ContentId,
+    violation: IntegrityViolation,
+}
+
+impl IntegrityError {
+    pub(super) fn new(id: ContentId, violation: IntegrityViolation) -> Self {
+        Self { id, violation }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &ContentId {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn violation(&self) -> &IntegrityViolation {
+        &self.violation
+    }
+}
+
+impl fmt::Display for IntegrityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "content {}: {}", self.id, self.violation)
+    }
+}
+
+impl Error for IntegrityError {}
+
+/// Why a write transaction was being rolled back.
 #[derive(Debug)]
 pub enum Abandoned {
-    /// The state found under the write lock did not allow initialization.
-    /// `Current` with the requested identity means another initializer won.
+    /// The state found under the write lock did not allow the operation.
+    /// `Current` with the requested identity means another initializer or
+    /// upgrader won.
     Found(DatabaseState),
     Failed(DriverError),
+    Integrity(IntegrityError),
 }
 
 impl fmt::Display for Abandoned {
@@ -132,6 +202,7 @@ impl fmt::Display for Abandoned {
         match self {
             Self::Found(state) => write!(f, "found {state} under the write lock"),
             Self::Failed(error) => write!(f, "{error}"),
+            Self::Integrity(error) => write!(f, "{error}"),
         }
     }
 }
@@ -144,6 +215,11 @@ pub enum StorageError {
     Driver(DriverError),
     Missing,
     Uninitialized,
+    /// The database is at an older schema version. Run
+    /// [`super::WorkspaceStore::upgrade`].
+    UpgradeRequired {
+        found: i64,
+    },
     UnsupportedSchemaVersion {
         found: i64,
     },
@@ -152,8 +228,9 @@ pub enum StorageError {
         requested: WorkspaceId,
         stored: WorkspaceId,
     },
-    /// Initialization was abandoned and the rollback also failed. The
-    /// connection was discarded.
+    Integrity(IntegrityError),
+    /// A write transaction was abandoned and the rollback also failed. For
+    /// initialization and upgrades the connection was discarded.
     RollbackFailed {
         abandoned: Abandoned,
         rollback: DriverError,
@@ -175,11 +252,13 @@ impl StorageError {
             Self::NonUtf8Path { .. }
             | Self::Missing
             | Self::Uninitialized
+            | Self::UpgradeRequired { .. }
             | Self::UnsupportedSchemaVersion { .. }
             | Self::Unrecognized(_)
             | Self::WorkspaceMismatch { .. }
+            | Self::Integrity(_)
             | Self::RollbackFailed {
-                abandoned: Abandoned::Found(_),
+                abandoned: Abandoned::Found(_) | Abandoned::Integrity(_),
                 ..
             } => None,
         }
@@ -189,6 +268,15 @@ impl StorageError {
         match state {
             DatabaseState::Missing => Self::Missing,
             DatabaseState::Uninitialized => Self::Uninitialized,
+            DatabaseState::Current(stored)
+            | DatabaseState::UpgradeRequired {
+                workspace_id: stored,
+                ..
+            } if stored != *requested => Self::WorkspaceMismatch {
+                requested: requested.clone(),
+                stored,
+            },
+            DatabaseState::UpgradeRequired { found, .. } => Self::UpgradeRequired { found },
             DatabaseState::Current(stored) => Self::WorkspaceMismatch {
                 requested: requested.clone(),
                 stored,
@@ -210,11 +298,16 @@ impl fmt::Display for StorageError {
             Self::Driver(error) => write!(f, "{error}"),
             Self::Missing => f.write_str("database does not exist"),
             Self::Uninitialized => f.write_str("database is not initialized"),
+            Self::UpgradeRequired { found } => write!(
+                f,
+                "database schema version {found} must be upgraded to {CURRENT_SCHEMA_VERSION}"
+            ),
             Self::UnsupportedSchemaVersion { found } => write!(
                 f,
                 "database schema version {found} is not supported (supported: {CURRENT_SCHEMA_VERSION})"
             ),
             Self::Unrecognized(reason) => write!(f, "unrecognized database: {reason}"),
+            Self::Integrity(error) => write!(f, "{error}"),
             Self::WorkspaceMismatch { requested, stored } => write!(
                 f,
                 "database belongs to workspace {:?}, not {:?}",
@@ -226,7 +319,7 @@ impl fmt::Display for StorageError {
                 rollback,
             } => write!(
                 f,
-                "initialization abandoned ({abandoned}), then rollback failed: {rollback}"
+                "transaction abandoned ({abandoned}), then rollback failed: {rollback}"
             ),
         }
     }

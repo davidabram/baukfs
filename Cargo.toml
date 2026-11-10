@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 baukfs = { path = "crates/baukfs" }
+blake3 = { version = "=1.8.7", default-features = false }
 turso = { version = "=0.8.3", default-features = false }
 
 [workspace.lints.clippy]

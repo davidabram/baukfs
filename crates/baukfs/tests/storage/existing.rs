@@ -2,7 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use baukfs::storage::{
-    BusyTimeout, CreateOutcome, DatabaseState, StorageError, Unrecognized, WorkspaceStore, inspect,
+    BusyTimeout, CURRENT_SCHEMA_VERSION, CreateOutcome, DatabaseState, StorageError, Unrecognized,
+    WorkspaceStore, inspect,
 };
 use turso::Value;
 
@@ -147,8 +148,12 @@ fn unsupported_schema_versions_are_reported_and_never_upgraded() {
     let dir = TestDir::new("unsupported-version");
     let path = dir.database();
     drop(create(&path, "ws-a").expect("create"));
-    raw_execute(&path, "UPDATE baukfs_metadata SET schema_version = 2");
-    let unsupported = DatabaseState::UnsupportedSchemaVersion { found: 2 };
+    let newer = CURRENT_SCHEMA_VERSION + 1;
+    raw_execute(
+        &path,
+        &format!("UPDATE baukfs_metadata SET schema_version = {newer}"),
+    );
+    let unsupported = DatabaseState::UnsupportedSchemaVersion { found: newer };
 
     let before = snapshot(&dir, &path);
     assert_eq!(state(&path), unsupported);
@@ -160,7 +165,7 @@ fn unsupported_schema_versions_are_reported_and_never_upgraded() {
         assert!(
             matches!(
                 result,
-                Err(StorageError::UnsupportedSchemaVersion { found: 2 })
+                Err(StorageError::UnsupportedSchemaVersion { found }) if found == newer
             ),
             "{result:?}"
         );
@@ -170,7 +175,7 @@ fn unsupported_schema_versions_are_reported_and_never_upgraded() {
         metadata_rows(&path),
         [[
             Value::Integer(1),
-            Value::Integer(2),
+            Value::Integer(newer),
             Value::Text("ws-a".to_owned())
         ]]
     );

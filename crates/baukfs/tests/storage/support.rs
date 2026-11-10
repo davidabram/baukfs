@@ -132,3 +132,82 @@ pub fn schema_cookie(path: &Path) -> i64 {
         other => panic!("unexpected schema cookie rows {other:?}"),
     }
 }
+
+/// The version-1 schema exactly as the version-1 binary created it, kept
+/// here as a frozen fixture independent of the library's upgrade steps.
+const VERSION_1_SCHEMA: &str = "
+BEGIN IMMEDIATE;
+CREATE TABLE baukfs_metadata (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+    workspace_id TEXT NOT NULL CHECK (length(workspace_id) > 0)
+) STRICT;
+CREATE TRIGGER baukfs_metadata_single_row
+BEFORE INSERT ON baukfs_metadata
+WHEN EXISTS (SELECT 1 FROM baukfs_metadata)
+BEGIN SELECT RAISE(ABORT, 'baukfs_metadata holds exactly one row'); END;
+CREATE TRIGGER baukfs_metadata_identity_immutable
+BEFORE UPDATE OF workspace_id ON baukfs_metadata
+WHEN NEW.workspace_id IS NOT OLD.workspace_id
+BEGIN SELECT RAISE(ABORT, 'baukfs workspace identity is immutable'); END;
+CREATE TRIGGER baukfs_metadata_undeletable
+BEFORE DELETE ON baukfs_metadata
+BEGIN SELECT RAISE(ABORT, 'baukfs_metadata row cannot be deleted'); END;
+";
+
+pub fn create_version_1(path: &Path, workspace_id: &str) {
+    let connection = raw_connection(path);
+    block_on(connection.execute_batch(VERSION_1_SCHEMA)).expect("version-1 schema");
+    block_on(connection.execute(
+        "INSERT INTO baukfs_metadata (singleton, schema_version, workspace_id) VALUES (1, 1, ?1)",
+        (workspace_id,),
+    ))
+    .expect("version-1 metadata");
+    block_on(connection.execute("COMMIT", ())).expect("commit version-1 schema");
+}
+
+pub fn object_names(path: &Path) -> Vec<String> {
+    raw_values(
+        &raw_reader(path),
+        "SELECT name FROM sqlite_schema ORDER BY name",
+    )
+    .into_iter()
+    .map(|row| match row.as_slice() {
+        [Value::Text(name)] => name.clone(),
+        other => panic!("unexpected object row {other:?}"),
+    })
+    .collect()
+}
+
+/// Deterministic pseudo-random bytes, distinct for distinct seeds.
+pub fn payload(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .collect()
+}
+
+/// Every stored content record as `(digest, byte_length, contents)`.
+pub fn content_rows(path: &Path) -> Vec<(Vec<u8>, i64, Vec<u8>)> {
+    raw_values(
+        &raw_reader(path),
+        "SELECT digest, byte_length, contents FROM baukfs_content ORDER BY digest",
+    )
+    .into_iter()
+    .map(|row| match <[Value; 3]>::try_from(row) {
+        Ok(
+            [
+                Value::Blob(digest),
+                Value::Integer(length),
+                Value::Blob(contents),
+            ],
+        ) => (digest, length, contents),
+        other => panic!("unexpected content row {other:?}"),
+    })
+    .collect()
+}
