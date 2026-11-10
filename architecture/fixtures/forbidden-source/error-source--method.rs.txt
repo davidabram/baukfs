@@ -1,0 +1,1 @@
+pub fn root<E: std::error::Error>(error: &E) -> bool { error.source().is_none() }

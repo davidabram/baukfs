@@ -1,0 +1,2 @@
+use std::error::Error;
+pub fn root<E: Error>(error: &E) -> bool { Error::source(error).is_none() }

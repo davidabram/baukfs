@@ -1,0 +1,2 @@
+use std::pin::Pin;
+pub fn f() -> Pin<Box<dyn Future<Output = ()> + Send>> { Box::pin(async {}) }

@@ -1,0 +1,2 @@
+use anyhow::Context;
+pub fn f() -> Result<(), anyhow::Error> { Ok(()) }

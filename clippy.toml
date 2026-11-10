@@ -1,0 +1,6 @@
+disallowed-types = [
+    { path = "std::boxed::Box", reason = "authored Box usage is forbidden; use concrete types" },
+]
+disallowed-methods = [
+    { path = "std::error::Error::source", reason = "Error::source traversal dispatches through trait objects" },
+]

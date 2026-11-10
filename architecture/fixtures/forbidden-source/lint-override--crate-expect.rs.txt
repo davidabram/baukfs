@@ -1,0 +1,1 @@
+#![expect(clippy::disallowed_methods)]

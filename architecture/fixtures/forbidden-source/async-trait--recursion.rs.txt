@@ -1,0 +1,2 @@
+#[async_recursion::async_recursion]
+pub async fn walk(n: u8) -> u8 { if n == 0 { 0 } else { walk(n - 1).await } }

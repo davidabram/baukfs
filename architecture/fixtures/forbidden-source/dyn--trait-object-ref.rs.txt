@@ -1,0 +1,1 @@
+pub fn show(value: &dyn std::fmt::Display) -> String { value.to_string() }

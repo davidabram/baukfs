@@ -1,0 +1,1 @@
+pub fn is_io<E: std::error::Error>(error: &E) -> bool { error.downcast_ref::<std::io::Error>().is_some() }

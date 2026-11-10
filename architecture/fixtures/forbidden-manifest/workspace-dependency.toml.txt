@@ -1,0 +1,5 @@
+[workspace]
+members = []
+
+[workspace.dependencies]
+async_recursion = { version = "1", package = "async-recursion" }

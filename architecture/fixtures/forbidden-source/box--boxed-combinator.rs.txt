@@ -1,0 +1,2 @@
+use futures::FutureExt;
+pub fn f() { let _ = async {}.boxed(); }

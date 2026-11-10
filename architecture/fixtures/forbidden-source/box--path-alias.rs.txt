@@ -1,0 +1,2 @@
+use std::boxed::Box as Owned;
+pub fn f() -> Owned<u8> { Owned::new(1) }

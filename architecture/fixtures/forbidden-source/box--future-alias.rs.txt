@@ -1,0 +1,2 @@
+use futures::future::BoxFuture;
+pub fn f<'a>() -> BoxFuture<'a, ()> { todo!() }

@@ -1,0 +1,1 @@
+pub struct Callbacks { pub on_done: Vec<Box<dyn FnMut(u8)>> }

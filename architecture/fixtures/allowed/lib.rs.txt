@@ -1,0 +1,66 @@
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+pub trait Store {
+    fn get(&self, key: &str) -> Option<&[u8]>;
+}
+
+pub struct Memory {
+    entries: Vec<(String, Vec<u8>)>,
+}
+
+impl Store for Memory {
+    fn get(&self, key: &str) -> Option<&[u8]> {
+        self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_slice())
+    }
+}
+
+pub enum Backend {
+    Memory(Memory),
+}
+
+impl Backend {
+    pub fn get(&self, key: &str) -> Option<&[u8]> {
+        match self {
+            Backend::Memory(store) => store.get(key),
+        }
+    }
+}
+
+pub fn lookup<S: Store>(store: &S, key: &str) -> usize {
+    store.get(key).map_or(0, <[u8]>::len)
+}
+
+pub fn visit(paths: &[PathBuf], mut each: impl FnMut(&Path)) {
+    for path in paths {
+        each(path);
+    }
+}
+
+pub fn ready() -> impl Future<Output = u8> {
+    async { 1 }
+}
+
+#[derive(Debug)]
+pub enum OpenError {
+    Missing(PathBuf),
+    Io(std::io::ErrorKind),
+}
+
+impl fmt::Display for OpenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OpenError::Missing(path) => write!(f, "missing {}", path.display()),
+            OpenError::Io(kind) => write!(f, "io: {kind}"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub const PLATFORM: &str = "linux";
+#[cfg(target_os = "macos")]
+pub const PLATFORM: &str = "macos";
+
+pub const SCHEMA: &str = include_str!("schema.sql");
+
+pub const WORDS: &str = "sandbox toolbox dynamic sources boxes";
