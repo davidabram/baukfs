@@ -15,6 +15,10 @@ const HEX_DIGITS: usize = DIGEST_LEN * 2;
 pub struct ContentId([u8; DIGEST_LEN]);
 
 impl ContentId {
+    pub(crate) fn from_digest(digest: [u8; DIGEST_LEN]) -> Self {
+        Self(digest)
+    }
+
     #[must_use]
     pub fn of(bytes: &[u8]) -> Self {
         Self(*blake3::hash(bytes).as_bytes())
