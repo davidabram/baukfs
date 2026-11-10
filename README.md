@@ -28,6 +28,7 @@ Implemented:
 
 - Cargo workspace with the `baukfs` library and the `baukfs-cli` binary, pinned to Rust 1.95.0 (edition 2024).
 - `baukfs-cli help` (also `-h`, `--help`).
+- In-memory workspace domain model: identifiers, lifecycle transitions, and typed errors (see `docs/domain-contract.md`).
 - Architecture rules (see `AGENTS.md`) enforced by `architecture/check.sh`, its fixture self-test, and `clippy.toml`.
 - Independent Nix checks for build, formatting, Clippy, tests, and architecture.
 
