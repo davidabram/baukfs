@@ -66,6 +66,8 @@ pub enum HistoryOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HistoryError {
     NotInitialized,
+    GitOriginConflict,
+    MalformedGitOrigin,
     InitializationConflict,
     MissingContent(ContentId),
     MissingManifest(ManifestId),

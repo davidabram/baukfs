@@ -1,4 +1,5 @@
 mod content;
+pub mod git_import;
 mod id;
 mod manifest;
 pub mod storage;

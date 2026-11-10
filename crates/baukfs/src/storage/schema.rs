@@ -6,7 +6,7 @@ use crate::WorkspaceId;
 
 use super::error::{DriverError, DriverErrorKind, DriverStep};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 3;
+pub const CURRENT_SCHEMA_VERSION: i64 = 4;
 
 /// The version the bootstrap creates. Every later version is reached by the
 /// ordered steps in [`UPGRADES`].
@@ -19,7 +19,7 @@ type SchemaObject = (&'static str, &'static str);
 /// Schema objects each version introduces, as `(type, name)`. Entry `i`
 /// belongs to version `i + 1`; a database at version `v` must contain every
 /// object of entries `0..v`.
-const INTRODUCED_OBJECTS: [&[SchemaObject]; 3] = [
+const INTRODUCED_OBJECTS: [&[SchemaObject]; 4] = [
     &[
         ("table", METADATA_TABLE),
         ("trigger", "baukfs_metadata_single_row"),
@@ -44,6 +44,12 @@ const INTRODUCED_OBJECTS: [&[SchemaObject]; 3] = [
         ("trigger", "baukfs_workspace_insert_once"),
         ("trigger", "baukfs_workspace_undeletable"),
         ("trigger", "baukfs_workspace_immutable"),
+    ],
+    &[
+        ("table", "baukfs_git_origin"),
+        ("trigger", "baukfs_git_origin_insert_once"),
+        ("trigger", "baukfs_git_origin_immutable"),
+        ("trigger", "baukfs_git_origin_undeletable"),
     ],
 ];
 
@@ -177,8 +183,23 @@ const VERSION_3: [SchemaStep; 12] = [
     ),
 ];
 
+const VERSION_4: [SchemaStep; 4] = [
+    SchemaStep::Execute(
+        "CREATE TABLE baukfs_git_origin (singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1), commit_id TEXT NOT NULL, tree_id TEXT NOT NULL, object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')), root_revision TEXT NOT NULL) STRICT",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_git_origin_insert_once BEFORE INSERT ON baukfs_git_origin WHEN EXISTS (SELECT 1 FROM baukfs_git_origin) BEGIN SELECT RAISE(ABORT, 'immutable Git origin'); END",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_git_origin_immutable BEFORE UPDATE ON baukfs_git_origin BEGIN SELECT RAISE(ABORT, 'immutable Git origin'); END",
+    ),
+    SchemaStep::Execute(
+        "CREATE TRIGGER baukfs_git_origin_undeletable BEFORE DELETE ON baukfs_git_origin BEGIN SELECT RAISE(ABORT, 'immutable Git origin'); END",
+    ),
+];
+
 /// Entry `i` upgrades version `i + 1` to `i + 2`.
-const UPGRADES: [&[SchemaStep]; 2] = [&VERSION_2, &VERSION_3];
+const UPGRADES: [&[SchemaStep]; 3] = [&VERSION_2, &VERSION_3, &VERSION_4];
 
 const INSERT_METADATA: &str =
     "INSERT INTO baukfs_metadata (singleton, schema_version, workspace_id) VALUES (1, ?1, ?2)";

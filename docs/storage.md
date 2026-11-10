@@ -1,6 +1,6 @@
-# Workspace storage (T05–T08)
+# Workspace storage (T05–T09)
 
-`baukfs::storage` stores one independent workspace copy per local Turso database: immutable contents, canonical manifests, immutable revisions and lineage, and the workspace session/base/head/status. Database initialization and history initialization are separate operations. Schema version 3 can be current with no history.
+`baukfs::storage` stores one independent workspace copy per local Turso database: immutable contents, canonical manifests, immutable revisions and lineage, and the workspace session/base/head/status. Database initialization and history initialization are separate operations. Schema version 4 can be current with no history.
 
 The domain modules (`WorkspaceId`, `ContentId`, `Workspace`, …) have no database code. Storage depends on them; they do not depend on storage.
 
@@ -25,9 +25,9 @@ The domain modules (`WorkspaceId`, `ContentId`, `Workspace`, …) have no databa
 | `IntegrityError` | The `ContentId` and the `IntegrityViolation`: `MalformedRecord`, `LengthMismatch { recorded, stored }`, `DigestMismatch { computed }`, or `ConflictingContents`. Its fields are private. |
 | `Abandoned` | Why a write transaction was rolled back: `Found(DatabaseState)`, `Failed(DriverError)`, or `Integrity(IntegrityError)`, or `History(HistoryError)`. |
 | `DriverError` | The failing `DriverStep` and a `DriverErrorKind`, classified from the driver's error variant. Its fields are private. |
-| `CURRENT_SCHEMA_VERSION` | `3`. |
+| `CURRENT_SCHEMA_VERSION` | `4`. |
 
-All operations are `async fn`s that drive the driver's own futures. The library does not own a runtime, spawn threads, or use blocking wrappers. Callers supply the executor. The tests use a small spinning `block_on`.
+All storage operations are `async fn`s that drive the driver's own futures. Storage does not own a runtime, spawn threads, or use blocking wrappers. The separate Git importer uses blocking subprocesses and pipe-reader threads (see `docs/git-import.md`). Callers supply the executor. The tests use a small spinning `block_on`.
 
 `WorkspaceStore` holds one private `turso::Connection`. There are no backend traits, pools, or erased types.
 
@@ -113,7 +113,7 @@ Version 3 adds manifests, revisions, and workspace state as described below. Pub
 4. Schema objects but no `baukfs_metadata` table: `Unrecognized(ForeignSchema)`.
 5. Not exactly one metadata row, or a non-integer version: `Unrecognized(MalformedMetadata)`.
 6. A version newer than `CURRENT_SCHEMA_VERSION`, or below 1: `UnsupportedSchemaVersion { found }`.
-7. Any object that version requires is missing: `Unrecognized(IncompleteSchema)`. Version 1 requires the metadata table and its three triggers. Version 2 also requires the content table and its two triggers. Version 3 additionally requires its three history tables and nine triggers.
+7. Any object that version requires is missing: `Unrecognized(IncompleteSchema)`. Version 1 requires the metadata table and its three triggers. Version 2 also requires the content table and its two triggers. Version 3 additionally requires its three history tables and nine triggers. Version 4 additionally requires the Git-origin table and its three triggers.
 8. An identity that is not text or not a valid `WorkspaceId`: `Unrecognized(MalformedMetadata)`.
 9. An older known version: `UpgradeRequired { found, workspace_id }`.
 10. Otherwise: `Current(workspace_id)`.
@@ -276,7 +276,7 @@ CREATE TABLE baukfs_workspace (
 
 Each history table has `insert_once`, `immutable`, and `undeletable` triggers, named `<table>_<suffix>`. Insert triggers reject a duplicate key before conflict resolution, including `INSERT OR REPLACE`. Manifest and revision updates and deletes are rejected. The workspace update trigger rejects updates of `session`, `base`, or `singleton`; its head and status columns remain writable. No public API changes persisted status in T08. The workspace identity remains in the unchanged metadata row. No foreign-key enforcement is assumed: reference checks run at the application boundary inside the transaction.
 
-Fresh creation uses bootstrap→2→3. Upgrade from version 2 preserves identity and content and creates empty history tables. Inspection, existing-only opening, and `create` against an old database remain non-migrating.
+Fresh creation uses bootstrap→2→3→4. Upgrade from version 2 preserves identity and content and creates empty history tables. Inspection, existing-only opening, and `create` against an old database remain non-migrating.
 
 | Public API | Result / behavior |
 | --- | --- |
@@ -309,7 +309,7 @@ The identifier is `rb3:` followed by the ordinary BLAKE3 hash of the entire prei
 
 `initialize_history` acquires checked `BEGIN IMMEDIATE`, then reads and validates any existing workspace and history. An identical session, root manifest, base/head at that root, and Idle status returns `AlreadyApplied` after verifying all matching records. Any other existing initialized state returns `InitializationConflict`; initialization after head advancement is therefore a conflict, even with the original manifest and session.
 
-For an uninitialized history it checks every distinct regular-file content reference using the content integrity verifier, persists or verifies the canonical manifest, persists or verifies the deterministic root revision, and inserts the workspace with `base == head == root` and `Idle`. All steps commit together. There is no Git import or filesystem scan.
+For an uninitialized history it checks every distinct regular-file content reference using the content integrity verifier, persists or verifies the canonical manifest, persists or verifies the deterministic root revision, and inserts the workspace with `base == head == root` and `Idle`. All steps commit together. T09 composes this internal initialization with Git provenance in the same transaction; see `docs/git-import.md`.
 
 ### Head transaction and retries
 
@@ -340,9 +340,13 @@ History tests cover root initialization and reopening, multiple revisions preser
 
 Two integration-test child processes start behind the existing bounded barrier and compete from one expected head: exactly one advances and the other reports stale. Unit process tests place a test-only checkpoint after persistence and before commit, or wait after the public API acknowledges commit. Both root initialization and advancement are killed at each boundary. Before commit, readers see only old state and reopening exposes none of the new manifest/revision/head; after acknowledged commit, reopening verifies both the revision and head. The unit harness uses the existing bounded-process techniques: concurrent stdout/stderr draining, a 30-second checkpoint deadline, and kill/reap on drop. Hooks are absent from non-test builds. Commit and rollback fault tests verify discarded handles and successful reconciliation through a fresh open.
 
+## Schema version 4: Git origin
+
+T09 adds one immutable Git-origin record, with commit ID, root tree ID, object format, and matching root RevisionId. Root history and origin commit in the same checked transaction; immutable content inserts can precede it. The 3→4 upgrade preserves all existing content and history and creates empty provenance. `WorkspaceStore::read_git_origin` validates the record against complete workspace history. See [Git import](git-import.md) for the public API, exact schema, execution controls, conflict behavior, and resource limits.
+
 ## Deferred responsibilities
 
-- **T09 and later:** filesystem scanning, restoration, cloning, runner integration, sealing, and publication. No new CLI commands are added by T08.
+- **After T09:** live filesystem scanning, restoration, cloning, runner integration, sealing, and publication. No new CLI commands are added by T09.
 - **History validation cost.** Reads and head writes verify complete ancestry and its content references. There is no validation cache or application-level history quota; verification cost grows with history and content size.
 - **Content storage limits.** Whole files are held in memory on insert and read, and stored as single BLOBs, with no streaming, chunking, compression, size limit beyond the driver's, or garbage collection. Manifests reference content, but raw SQL can still delete content. Reads and history writes reject missing references.
 - **Operation deadlines and workspace serialization.** Multiprocess WAL plus `BEGIN IMMEDIATE` and an explicit head compare-and-swap serialize the implemented workspace writes. Whole-operation deadlines remain the caller’s responsibility.

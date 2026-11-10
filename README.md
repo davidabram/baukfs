@@ -35,9 +35,10 @@ Implemented:
 - Workspace storage foundation in `baukfs::storage`: one local Turso database per workspace copy, always opened in multiprocess WAL mode. Covers explicit creation, existing-only opening, read-only inspection, and workspace identity (see `docs/storage.md`).
 - Content identity: `ContentId`, the BLAKE3 digest of the exact bytes, written as `b3:` plus 64 lowercase hex digits.
 - Immutable, content-addressed storage of whole-file bytes (schema version 2): idempotent, cross-process-safe insertion that never overwrites, and reads that verify length and digest before returning bytes, with typed integrity errors.
-- Explicit, atomic schema upgrades from versions 1 and 2 (`WorkspaceStore::upgrade`). Inspection and normal opening never migrate.
+- Explicit, atomic schema upgrades from versions 1, 2, and 3 (`WorkspaceStore::upgrade`). Inspection and normal opening never migrate.
 - Validated filesystem manifest domain model (T07): raw-byte workspace paths and symlink targets, explicit directories, deterministic binary encoding, strict decoding, and domain-separated BLAKE3 `ManifestId` (see `docs/manifest.md`).
-- Persistent canonical manifests, immutable revision lineage, and atomic workspace history (T08, schema version 3): validated root initialization, idle-only head compare-and-swap, verified retries, and typed conflicts (see `docs/storage.md`).
+- Persistent canonical manifests, immutable revision lineage, and atomic workspace history (T08): validated root initialization, idle-only head compare-and-swap, verified retries, and typed conflicts (see `docs/storage.md`).
+- Local committed Git snapshot import (T09, schema version 4): explicit commit selection, SHA-1/SHA-256, raw-byte paths, controlled object reads, and atomic root history plus immutable Git provenance (see `docs/git-import.md`).
 
 Planned, not implemented:
 
@@ -52,7 +53,7 @@ Planned, not implemented:
 
 ## Development
 
-Enter the development shell, which provides the pinned toolchain, ripgrep, and Bash 5:
+Enter the development shell, which provides the pinned toolchain, Git, ripgrep, and Bash 5:
 
 ```sh
 nix develop

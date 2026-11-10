@@ -1,6 +1,7 @@
 mod connection;
 mod content;
 mod error;
+mod git_origin;
 mod history;
 mod schema;
 #[cfg(test)]
@@ -295,6 +296,35 @@ impl WorkspaceStore {
     ) -> Result<Option<crate::Manifest>, StorageError> {
         self.history_transaction(TransactionBehavior::Deferred, async |connection| {
             history::manifest(connection, id).await
+        })
+        .await
+    }
+
+    /// Reads immutable Git provenance and validates its matching root history.
+    ///
+    /// # Errors
+    /// Returns typed history, integrity, or transaction errors.
+    pub async fn read_git_origin(
+        &mut self,
+    ) -> Result<Option<crate::git_import::GitOrigin>, StorageError> {
+        let id = self.workspace_id.clone();
+        self.history_transaction(TransactionBehavior::Deferred, async |connection| {
+            git_origin::read(connection, &id).await
+        })
+        .await
+    }
+
+    pub(crate) async fn initialize_git_history(
+        &mut self,
+        session: &crate::SessionId,
+        manifest: &crate::Manifest,
+        commit: String,
+        tree: String,
+        format: crate::git_import::ObjectFormat,
+    ) -> Result<(crate::git_import::GitOrigin, HistoryOutcome), StorageError> {
+        let id = self.workspace_id.clone();
+        self.history_transaction(TransactionBehavior::Immediate, async |connection| {
+            git_origin::initialize(connection, &id, session, manifest, commit, tree, format).await
         })
         .await
     }

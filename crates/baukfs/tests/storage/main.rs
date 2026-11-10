@@ -2,6 +2,7 @@ mod child;
 mod concurrency;
 mod content;
 mod existing;
+mod git_import;
 mod harness;
 mod history;
 mod lifecycle;

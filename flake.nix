@@ -81,7 +81,13 @@
                 cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
               }
             );
-            test = craneLib.cargoTest (commonArgs // { inherit cargoArtifacts; });
+            test = craneLib.cargoTest (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                nativeCheckInputs = [ pkgs.git ];
+              }
+            );
             architecture =
               pkgs.runCommand "baukfs-architecture"
                 {
@@ -100,6 +106,7 @@
             packages = [
               pkgs.bash
               pkgs.ripgrep
+              pkgs.git
               pkgs.nixfmt
             ];
           };
